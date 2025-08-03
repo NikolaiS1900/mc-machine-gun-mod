@@ -1,46 +1,80 @@
 package ewewukek.musketmod;
 
+import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.Multimap;
+
 import net.minecraft.sounds.SoundEvent;
-import net.minecraft.world.entity.EquipmentSlotGroup;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.component.ItemAttributeModifiers;
 
 public class MusketItem extends GunItem {
-    public MusketItem(Item.Properties properties) {
-        super(properties);
-    }
+    public static final float BAYONET_SPEED = -2.4f;
 
-    public static ItemAttributeModifiers createBayonetAttributes() {
-        return ItemAttributeModifiers.builder()
-            .add(Attributes.ATTACK_DAMAGE, new AttributeModifier(
-                BASE_ATTACK_DAMAGE_ID, Config.bayonetDamage - 1, AttributeModifier.Operation.ADD_VALUE),
-                EquipmentSlotGroup.MAINHAND)
-            .add(Attributes.ATTACK_SPEED, new AttributeModifier(
-                BASE_ATTACK_SPEED_ID, Config.bayonetSpeed - 4, AttributeModifier.Operation.ADD_VALUE),
-                EquipmentSlotGroup.MAINHAND)
-            .build();
+    public static float bulletStdDev;
+    public static float bulletSpeed;
+    public static float damageMultiplierMin;
+    public static float damageMultiplierMax;
+
+    public static int durability;
+    public static int bayonetDamage;
+
+    public final Multimap<Attribute, AttributeModifier> bayonetAttributeModifiers;
+
+    public MusketItem(Item.Properties properties, boolean withBayonet) {
+        super(properties.defaultDurability(durability));
+        if (withBayonet) {
+            ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+            builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(
+                BASE_ATTACK_DAMAGE_UUID, "Weapon modifier", bayonetDamage, AttributeModifier.Operation.ADDITION));
+            builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(
+                BASE_ATTACK_SPEED_UUID, "Weapon modifier", BAYONET_SPEED, AttributeModifier.Operation.ADDITION));
+            bayonetAttributeModifiers = builder.build();
+        } else {
+            bayonetAttributeModifiers = null;
+        }
     }
 
     @Override
     public float bulletStdDev() {
-        return Config.musketBulletStdDev;
+        return bulletStdDev;
     }
 
     @Override
     public float bulletSpeed() {
-        return Config.musketBulletSpeed;
+        return bulletSpeed;
     }
 
     @Override
-    public float damage() {
-        return Config.musketDamage;
+    public float damageMultiplierMin() {
+        return damageMultiplierMin;
     }
 
     @Override
-    public SoundEvent fireSound(ItemStack stack) {
+    public float damageMultiplierMax() {
+        return damageMultiplierMax;
+    }
+
+    @Override
+    public SoundEvent fireSound() {
         return Sounds.MUSKET_FIRE;
+    }
+
+    @Override
+    public boolean twoHanded() {
+        return true;
+    }
+
+    @Override
+    public boolean ignoreInvulnerableTime() {
+        return false;
+    }
+
+    @Override
+    public Multimap<Attribute, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+        return slot == EquipmentSlot.MAINHAND && bayonetAttributeModifiers != null
+                ? bayonetAttributeModifiers : super.getDefaultAttributeModifiers(slot);
     }
 }

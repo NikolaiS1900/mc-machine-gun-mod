@@ -1,16 +1,15 @@
 modLoader="javafml"
-loaderVersion="[0,)"
+loaderVersion="[44,)"
 license="MIT License"
 issueTrackerURL="https://github.com/ewewukek/mc-musketmod/issues"
-
 [[mods]]
 modId="musketmod"
-version="${mod_version}"
+version="${file.jarVersion}"
 displayName="Musket Mod"
 #updateJSONURL=""
 displayURL="https://github.com/ewewukek/mc-musketmod"
-logoFile="logo.png"
-credits="lilypuree, MikhailTapio, Xannosz, SkpC9 for their contribution"
+#logoFile="musket.png"
+credits="lilypuree and MikhailTapio for their contribution"
 authors="ewewukek"
 description='''
 Small mod that adds craftable muskets and pistols.

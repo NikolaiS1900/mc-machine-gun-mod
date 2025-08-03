@@ -1,23 +1,11 @@
 {
   "required": true,
+  "minVersion": "0.8",
   "package": "ewewukek.musketmod.mixin",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_17",
   "client": [
-    "AbstractClientPlayerMixin",
-    "HumanoidModelMixin",
-    "ItemInHandRendererMixin",
-    "LocalPlayerMixin",
-    "MinecraftMixin",
-    "MultiPlayerGameModeMixin",
-    "PlayerMixin",
-    "SkeletonModelMixin"
-  ],
-  "mixins": [
-    "AbstractSkeletonMixin",
-    "EntityMixin",
-    "LootTableMixin",
-    "PillagerMixin",
-    "ReloadableServerRegistriesHolderMixin"
+    "MixinHeldItemRenderer",
+    "MixinPlayerEntityRenderer"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -1,16 +1,8 @@
 package ewewukek.musketmod;
 
-import org.apache.commons.lang3.tuple.Pair;
-import org.jetbrains.annotations.Nullable;
-
-import com.mojang.serialization.Codec;
-
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.component.DataComponentType;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.codec.ByteBufCodecs;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
@@ -23,21 +15,19 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.UseAnim;
-import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
-import net.minecraft.world.scores.ScoreAccess;
+import net.minecraft.world.scores.Score;
 import net.minecraft.world.scores.Scoreboard;
 import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 
 public abstract class GunItem extends Item {
-    public static final DataComponentType<Boolean> LOADED = new DataComponentType.Builder<Boolean>()
-        .persistent(Codec.BOOL).networkSynchronized(ByteBufCodecs.BOOL).build();
-    public static final DataComponentType<Byte> LOADING_STAGE = new DataComponentType.Builder<Byte>()
-        .persistent(Codec.BYTE).networkSynchronized(ByteBufCodecs.BYTE).build();
+    public static final int LOADING_STAGE_1 = 5;
+    public static final int LOADING_STAGE_2 = 10;
+    public static final int LOADING_STAGE_3 = 20;
+    public static final int RELOAD_DURATION = 30;
 
     // for RenderHelper
     public static ItemStack activeMainHandStack;
@@ -49,179 +39,168 @@ public abstract class GunItem extends Item {
 
     public abstract float bulletStdDev();
     public abstract float bulletSpeed();
-    public abstract float damage();
-    public abstract SoundEvent fireSound(ItemStack stack);
+    public abstract float damageMultiplierMin();
+    public abstract float damageMultiplierMax();
+    public abstract SoundEvent fireSound();
+    public abstract boolean twoHanded();
+    public abstract boolean ignoreInvulnerableTime();
 
-    public int pelletCount() {
-        return 1;
-    }
-
-    public boolean twoHanded() {
-        return true;
-    }
-
-    public float bulletDropReduction() {
-        return 0.0f;
-    }
-
-
-    public int hitDurabilityDamage() {
-        return 1;
-    }
-
-    // use fireSound(ItemStack)
-    @Deprecated
-    public SoundEvent fireSound() {
-        return fireSound(ItemStack.EMPTY);
-    }
-
-    public static boolean canUse(LivingEntity entity) {
-        boolean creative = entity instanceof Player player && player.getAbilities().instabuild;
-        return creative || (!entity.isEyeInFluid(FluidTags.WATER) && !entity.isEyeInFluid(FluidTags.LAVA));
-    }
-
-    public boolean canUseFrom(LivingEntity entity, InteractionHand hand) {
+    public boolean canUseFrom(Player player, InteractionHand hand) {
         if (hand == InteractionHand.MAIN_HAND) {
             return true;
         }
         if (twoHanded()) {
             return false;
         }
-        // pistol in offhand is unusable if musket is equipped in main hand
-        ItemStack stack = entity.getMainHandItem();
-        if (!stack.isEmpty() && stack.getItem() instanceof GunItem gun) {
-            return !gun.twoHanded();
+        ItemStack mainHandStack = player.getItemInHand(InteractionHand.MAIN_HAND);
+        if (!mainHandStack.isEmpty() && mainHandStack.getItem() instanceof GunItem) {
+            return !((GunItem)mainHandStack.getItem()).twoHanded();
         }
         return true;
     }
 
-    public static boolean isInHand(LivingEntity entity, InteractionHand hand) {
-        ItemStack stack = entity.getItemInHand(hand);
-        if (stack.isEmpty()) return false;
-        if (stack.getItem() instanceof GunItem gun) {
-            return gun.canUseFrom(entity, hand);
+    @Override
+    public InteractionResultHolder<ItemStack> use(Level worldIn, Player player, InteractionHand hand) {
+        if (!canUseFrom(player, hand)) return super.use(worldIn, player, hand);
+
+        ItemStack stack = player.getItemInHand(hand);
+        boolean creative = player.getAbilities().instabuild;
+
+        if (player.isEyeInFluid(FluidTags.WATER) && !creative) {
+            return InteractionResultHolder.fail(stack);
+        }
+
+        // shoot from left hand if both are loaded
+        if (hand == InteractionHand.MAIN_HAND && !twoHanded() && isLoaded(stack)) {
+            ItemStack offhandStack = player.getItemInHand(InteractionHand.OFF_HAND);
+            if (!offhandStack.isEmpty() && offhandStack.getItem() instanceof GunItem) {
+                GunItem offhandGun = (GunItem)offhandStack.getItem();
+                if (!offhandGun.twoHanded() && isLoaded(offhandStack)) {
+                    return InteractionResultHolder.pass(stack);
+                }
+            }
+        }
+
+        boolean haveAmmo = !findAmmo(player).isEmpty() || creative;
+        boolean loaded = isLoaded(stack);
+
+        if (loaded) {
+            if (!worldIn.isClientSide) {
+                Vec3 front = Vec3.directionFromRotation(player.getXRot(), player.getYRot());
+                HumanoidArm arm = hand == InteractionHand.MAIN_HAND ? player.getMainArm() : player.getMainArm().getOpposite();
+                boolean isRightHand = arm == HumanoidArm.RIGHT;
+                Vec3 side = Vec3.directionFromRotation(0, player.getYRot() + (isRightHand ? 90 : -90));
+                Vec3 down = Vec3.directionFromRotation(player.getXRot() + 90, player.getYRot());
+                fire(player, front, side.add(down).scale(0.15));
+            }
+            player.playSound(fireSound(), 3.5f, 1);
+
+            setLoaded(stack, false);
+            stack.hurtAndBreak(1, player, (entity) -> {
+                entity.broadcastBreakEvent(hand);
+            });
+
+            player.releaseUsingItem();
+            if (worldIn.isClientSide) setActiveStack(hand, stack);
+
+            return InteractionResultHolder.consume(stack);
+
+        } else if (haveAmmo) {
+            setLoadingStage(stack, 1);
+
+            player.startUsingItem(hand);
+            if (worldIn.isClientSide) setActiveStack(hand, stack);
+
+            return InteractionResultHolder.consume(stack);
+
+        } else {
+            return InteractionResultHolder.fail(stack);
+        }
+    }
+
+    @Override
+    public void releaseUsing(ItemStack stack, Level worldIn, LivingEntity entityLiving, int timeLeft) {
+        setLoadingStage(stack, 0);
+    }
+
+    @Override
+    public void onUseTick(Level world, LivingEntity entity, ItemStack stack, int timeLeft) {
+        int usingDuration = getUseDuration(stack) - timeLeft;
+        int loadingStage = getLoadingStage(stack);
+
+        if (loadingStage == 1 && usingDuration >= LOADING_STAGE_1) {
+            entity.playSound(Sounds.MUSKET_LOAD_0, 0.8f, 1);
+            setLoadingStage(stack, 2);
+
+        } else if (loadingStage == 2 && usingDuration >= LOADING_STAGE_2) {
+            entity.playSound(Sounds.MUSKET_LOAD_1, 0.8f, 1);
+            setLoadingStage(stack, 3);
+
+        } else if (loadingStage == 3 && usingDuration >= LOADING_STAGE_3) {
+            entity.playSound(Sounds.MUSKET_LOAD_2, 0.8f, 1);
+            setLoadingStage(stack, 4);
+        }
+
+        if (world.isClientSide && entity instanceof Player) {
+            setActiveStack(entity.getUsedItemHand(), stack);
+            return;
+        }
+
+        if (usingDuration >= RELOAD_DURATION && !isLoaded(stack)) {
+            if (entity instanceof Player) {
+                Player player = (Player)entity;
+                if (!player.getAbilities().instabuild) {
+                    ItemStack ammoStack = findAmmo(player);
+                    if (ammoStack.isEmpty()) return;
+
+                    ammoStack.shrink(1);
+                    if (ammoStack.isEmpty()) player.getInventory().removeItem(ammoStack);
+                }
+            }
+
+            // played on server
+            world.playSound(null, entity.getX(), entity.getY(), entity.getZ(), Sounds.MUSKET_READY, entity.getSoundSource(), 0.8f, 1);
+            setLoaded(stack, true);
+        }
+    }
+
+    @Override
+    public boolean hurtEnemy(ItemStack stack, LivingEntity enemy, LivingEntity entityIn) {
+        stack.hurtAndBreak(1, entityIn, (entity) -> {
+            entity.broadcastBreakEvent(EquipmentSlot.MAINHAND);
+        });
+        return false;
+    }
+
+    @Override
+    public boolean mineBlock(ItemStack stack, Level worldIn, BlockState state, BlockPos pos, LivingEntity entityIn) {
+        if (state.getDestroySpeed(worldIn, pos) != 0) {
+            stack.hurtAndBreak(1, entityIn, (entity) -> {
+                entity.broadcastBreakEvent(EquipmentSlot.MAINHAND);
+            });
         }
         return false;
     }
 
-    public static boolean isHoldingGun(LivingEntity entity) {
-        return getHoldingHand(entity) != null;
-    }
-
-    @Nullable
-    public static InteractionHand getHoldingHand(LivingEntity entity) {
-        if (isInHand(entity, InteractionHand.MAIN_HAND)) return InteractionHand.MAIN_HAND;
-        if (isInHand(entity, InteractionHand.OFF_HAND)) return InteractionHand.OFF_HAND;
-        return null;
-    }
-
-    public Vec3 smokeOffsetFor(LivingEntity entity, InteractionHand hand) {
-        HumanoidArm arm = hand == InteractionHand.MAIN_HAND
-            ? entity.getMainArm() : entity.getMainArm().getOpposite();
-        return smokeOffsetFor(entity, arm);
-    }
-
-    public Vec3 smokeOffsetFor(LivingEntity entity, HumanoidArm arm) {
-        boolean isRightHand = arm == HumanoidArm.RIGHT;
-        Vec3 side = Vec3.directionFromRotation(0, entity.getYRot() + (isRightHand ? 90 : -90));
-        Vec3 down = Vec3.directionFromRotation(entity.getXRot() + 90, entity.getYRot());
-        return side.add(down).scale(0.15);
-    }
-
-    public static boolean hasFlame(ItemStack stack) {
-        return VanillaHelper.getEnchantmentLevel(stack, Enchantments.FLAME) > 0;
-    }
-
-    public static boolean hasInfinity(ItemStack stack) {
-        return VanillaHelper.getEnchantmentLevel(stack, Enchantments.INFINITY) > 0;
-    }
-
-    public static int getPowerLevel(ItemStack stack) {
-        return VanillaHelper.getEnchantmentLevel(stack, Enchantments.POWER);
-    }
-
-    public static int getQuickChargeLevel(ItemStack stack) {
-        return VanillaHelper.getEnchantmentLevel(stack, Enchantments.QUICK_CHARGE);
-    }
-
-    public static Pair<Integer, Integer> getLoadingDuration(ItemStack stack) {
-        int level = getQuickChargeLevel(stack);
-        int stages = Config.loadingStages;
-        float total = stages * Config.loadingStageDuration;
-        float reduction = level * Config.reductionPerQuickChargeLevel;
-        float duration = (total - reduction) / stages;
-        if (duration < 0.25f) duration = 0.25f;
-        if (level == 3) stages--;
-        return Pair.of(stages, (int)(20 * duration));
-    }
-
     @Override
-    public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
-        ItemStack stack = player.getItemInHand(hand);
-        if (!canUse(player) || !canUseFrom(player, hand)) {
-            return InteractionResultHolder.pass(stack);
-        }
-
-        if (isLoaded(stack)) {
-            if (!level.isClientSide) {
-                Vec3 direction = Vec3.directionFromRotation(player.getXRot(), player.getYRot());
-                fire(player, stack, direction, smokeOffsetFor(player, hand));
-            }
-            player.playSound(fireSound(stack), 3.5f, 1);
-
-            setLoaded(stack, false);
-            stack.hurtAndBreak(1, player, Player.getSlotForHand(hand));
-
-            player.releaseUsingItem();
-            if (level.isClientSide) setActiveStack(hand, stack);
-
-            return InteractionResultHolder.consume(stack);
-
-        } else if (hand == InteractionHand.MAIN_HAND) {
-            // shoot from offhand if it's loaded
-            ItemStack offhandStack = player.getOffhandItem();
-            if (offhandStack.getItem() instanceof GunItem offhandGun && isLoaded(offhandStack)
-            && offhandGun.canUseFrom(player, InteractionHand.OFF_HAND)) {
-
-                return InteractionResultHolder.pass(stack);
-            }
-        }
-
-        if (getLoadingStage(stack) == 0) {
-            if (!checkAmmo(player, stack)) {
-                return InteractionResultHolder.fail(stack);
-            }
-            setLoadingStage(stack, 1);
-
-        } else { // skip stage duration if it's last one (cocking the hammer)
-            int loadingStages = getLoadingDuration(stack).getLeft();
-            if (getLoadingStage(stack) == loadingStages)
-                setLoadingStage(stack, loadingStages + 1);
-        }
-
-        player.startUsingItem(hand);
-
-        return InteractionResultHolder.consume(stack);
+    public int getUseDuration(ItemStack stack) {
+        return 72000;
     }
 
-    @Override
-    public UseAnim getUseAnimation(ItemStack stack) {
-        return UseAnim.CROSSBOW;
+    public void fire(LivingEntity shooter, Vec3 direction) {
+        fire(shooter, direction, Vec3.ZERO);
     }
 
-    public static Vec3 addSpread(Vec3 direction, RandomSource random, float spreadStdDev) {
-        float gaussian = Math.abs((float)random.nextGaussian());
+    public void fire(LivingEntity shooter, Vec3 direction, Vec3 smokeOriginOffset) {
+        RandomSource random = shooter.getRandom();
+        Level level = shooter.level;
+
+        float angle = (float) Math.PI * 2 * random.nextFloat();
+        float gaussian = Math.abs((float) random.nextGaussian());
         if (gaussian > 4) gaussian = 4;
-        float error = (float)Math.toRadians(spreadStdDev) * gaussian;
-        return applyError(direction, random, error);
-    }
 
-    public static Vec3 addUniformSpread(Vec3 direction, RandomSource random, float spread) {
-        float error = (float)Math.toRadians(spread) * random.nextFloat();
-        return applyError(direction, random, error);
-    }
+        float spread = bulletStdDev() * gaussian;
 
-    public static Vec3 applyError(Vec3 direction, RandomSource random, float coneAngle) {
         // a plane perpendicular to direction
         Vec3 n1;
         Vec3 n2;
@@ -233,228 +212,47 @@ public abstract class GunItem extends Item {
             n2 = direction.cross(n1);
         }
 
-        float angle = Mth.TWO_PI * random.nextFloat();
-        // signs are not important for random angle
-        return direction.scale(Mth.cos(coneAngle))
-            .add(n1.scale(Mth.sin(coneAngle) * Mth.sin(angle)))
-            .add(n2.scale(Mth.sin(coneAngle) * Mth.cos(angle)));
+        Vec3 motion = direction.scale(Mth.cos(spread))
+            .add(n1.scale(Mth.sin(spread) * Mth.sin(angle))) // signs are not important for random angle
+            .add(n2.scale(Mth.sin(spread) * Mth.cos(angle)))
+            .scale(bulletSpeed());
+
+        Vec3 origin = new Vec3(shooter.getX(), shooter.getEyeY(), shooter.getZ());
+
+        BulletEntity bullet = new BulletEntity(level);
+        bullet.setOwner(shooter);
+        bullet.setPos(origin);
+        bullet.setInitialSpeed(bulletSpeed());
+        bullet.setDeltaMovement(motion);
+        float t = random.nextFloat();
+        bullet.damageMultiplier = t * damageMultiplierMin() + (1 - t) * damageMultiplierMax();
+        bullet.ignoreInvulnerableTime = ignoreInvulnerableTime();
+
+        level.addFreshEntity(bullet);
+        MusketMod.sendSmokeEffect(shooter, origin.add(smokeOriginOffset), direction);
     }
 
-    public Vec3 aimAt(LivingEntity entity, LivingEntity target) {
-        double dist = entity.distanceTo(target);
-        double ticks = 20 * dist / bulletSpeed();
-        // predicted bullet drop
-        double bulletDrop = 0.5 * ticks * ticks * BulletEntity.GRAVITY;
-        if (this == Items.MUSKET_WITH_SCOPE) {
-            bulletDrop *= Config.bulletGravityMultiplier;
-        }
-        Vec3 pos = new Vec3(
-            target.getX(),
-            0.5 * (target.getEyeY() + target.getY(0.5)),
-            target.getZ()
-           );
-        return new Vec3(
-            pos.x() - entity.getX(),
-            pos.y() + bulletDrop - entity.getEyeY(),
-            pos.z() - entity.getZ()
-        ).normalize();
-    }
-
-    public static void mobReload(LivingEntity entity, InteractionHand hand) {
-        if (entity.isUsingItem()) return;
-        Level level = entity.level();
-        if (level.isClientSide) return;
-        ItemStack stack = entity.getItemInHand(hand);
-        if (isLoaded(stack)) return;
-
-        GunItem.setLoadingStage(stack, 1);
-        entity.startUsingItem(hand);
-    }
-
-    public void mobUse(LivingEntity entity, InteractionHand hand, Vec3 direction) {
-        ItemStack stack = entity.getItemInHand(hand);
-        HumanoidArm arm = entity.getMainArm();
-        if (hand == InteractionHand.OFF_HAND) arm = arm.getOpposite();
-        mobUse(entity, stack, direction, smokeOffsetFor(entity, arm));
-    }
-
-    public void mobUse(LivingEntity entity, ItemStack stack, Vec3 direction, Vec3 smokeOffset) {
-        Level level = entity.level();
-        if (level.isClientSide) return;
-        if (!isLoaded(stack)) return;
-
-        fire(entity, stack, direction, smokeOffset);
-        entity.playSound(fireSound(stack), 3.5f, 1);
-        setLoaded(stack, false);
-    }
-
-    public static int reloadDuration(ItemStack stack) {
-        Pair<Integer, Integer> loadingDuration = getLoadingDuration(stack);
-        int loadingStages = loadingDuration.getLeft();
-        int ticksPerLoadingStage = loadingDuration.getRight();
-
-        int loadingStagesRemaining = 1 + loadingStages - getLoadingStage(stack);
-        return Math.max(0, loadingStagesRemaining) * ticksPerLoadingStage;
-    }
-
-    public static boolean checkAmmo(Player player, ItemStack stack) {
-        if (player.getAbilities().instabuild || hasInfinity(stack)) return true;
-        ItemStack ammoStack = findAmmo(player);
-        return !ammoStack.isEmpty();
-    }
-
-    public static void consumeAmmo(Player player, ItemStack stack) {
-        if (player.getAbilities().instabuild || hasInfinity(stack)) return;
-
-        ItemStack ammoStack = findAmmo(player);
-        ammoStack.shrink(1);
-        if (ammoStack.isEmpty()) {
-            player.getInventory().removeItem(ammoStack);
-        }
-    }
-
-    @Override
-    public void releaseUsing(ItemStack stack, Level level, LivingEntity entity, int ticksLeft) {
-        if (isLoaded(stack)) {
-            setLoadingStage(stack, 0);
-
-        } else {
-            int usingTicks = getUseDuration(stack, entity) - ticksLeft;
-            int ticksPerLoadingStage = getLoadingDuration(stack).getRight();
-            int prevLoadingStage = getLoadingStage(stack);
-            int loadingStage = prevLoadingStage + usingTicks / ticksPerLoadingStage;
-
-            if (prevLoadingStage == 1) {
-                if (loadingStage == 1) {
-                    setLoadingStage(stack, 0);
-
-                } else if (!isLoaded(stack) && entity instanceof Player player){
-                    consumeAmmo(player, stack);
-                }
-            }
-            setLoadingStage(stack, loadingStage);
-        }
-    }
-
-    @Override
-    public void onUseTick(Level level, LivingEntity entity, ItemStack stack, int ticksLeft) {
-        Pair<Integer, Integer> loadingDuration = getLoadingDuration(stack);
-        int loadingStages = loadingDuration.getLeft();
-        int ticksPerLoadingStage = loadingDuration.getRight();
-
-        int usingTicks = getUseDuration(stack, entity) - ticksLeft;
-        int prevLoadingStage = getLoadingStage(stack);
-        int loadingStage = prevLoadingStage + usingTicks / ticksPerLoadingStage;
-
-        if (loadingStage < loadingStages && usingTicks == ticksPerLoadingStage / 2) {
-            entity.playSound(Sounds.MUSKET_LOAD_0, 0.8f, 1);
-        }
-        if (usingTicks > 0 && usingTicks % ticksPerLoadingStage == 0) {
-            if (loadingStage < loadingStages) {
-                entity.playSound(Sounds.MUSKET_LOAD_1, 0.8f, 1);
-            } else if (loadingStage == loadingStages) {
-                entity.playSound(Sounds.MUSKET_LOAD_2, 0.8f, 1);
-            }
-        }
-
-        if (level.isClientSide && entity instanceof Player) {
-            setActiveStack(entity.getUsedItemHand(), stack);
-            return;
-        }
-
-        if (loadingStage > loadingStages && !isLoaded(stack)) {
-            // played on server
-            level.playSound(null, entity.getX(), entity.getY(), entity.getZ(), Sounds.MUSKET_READY, entity.getSoundSource(), 0.8f, 1);
-            if (prevLoadingStage == 1 && entity instanceof Player player) {
-                consumeAmmo(player, stack);
-            }
-            setLoaded(stack, true);
-        }
-    }
-
-    @Override
-    public boolean hurtEnemy(ItemStack stack, LivingEntity target, LivingEntity entity) {
-        stack.hurtAndBreak(hitDurabilityDamage(), entity, EquipmentSlot.MAINHAND);
-        return false;
-    }
-
-    @Override
-    public boolean mineBlock(ItemStack stack, Level level, BlockState blockState, BlockPos blockPos, LivingEntity entity) {
-        if (blockState.getDestroySpeed(level, blockPos) != 0) {
-            stack.hurtAndBreak(hitDurabilityDamage(), entity, EquipmentSlot.MAINHAND);
-        }
-        return false;
-    }
-
-    @Override
-    public int getUseDuration(ItemStack stack, LivingEntity entity) {
-        return 72000;
-    }
-
-    @Override
-    public int getEnchantmentValue() {
-        return 14;
-    }
-
-    // use mobUse()
-    @Deprecated
-    public void fire(LivingEntity entity, Vec3 direction) {
-        ItemStack stack = entity.getMainHandItem();
-        InteractionHand hand = InteractionHand.MAIN_HAND;
-        if (!(stack.getItem() instanceof GunItem)) {
-            stack = entity.getOffhandItem();
-            hand = InteractionHand.OFF_HAND;
-        }
-        fire(entity, stack, direction, smokeOffsetFor(entity, hand));
-    }
-
-    public void fire(LivingEntity entity, ItemStack stack, Vec3 direction, Vec3 smokeOffset) {
-        Level level = entity.level();
-        Vec3 origin = new Vec3(entity.getX(), entity.getEyeY(), entity.getZ());
-        boolean flame = hasFlame(stack);
-        float damage = damage() + Config.damagePerPowerLevel * getPowerLevel(stack);
-
-        for (int i = 0; i < pelletCount(); i++) {
-            BulletEntity bullet = new BulletEntity(level);
-            bullet.setOwner(entity);
-            bullet.setPos(origin);
-            bullet.setVelocity(bulletSpeed(), addSpread(direction, entity.getRandom(), bulletStdDev()));
-            bullet.damage = damage;
-            bullet.setDropReduction(bulletDropReduction());
-            bullet.setPelletCount(pelletCount());
-            if (flame) {
-                bullet.igniteForSeconds(100.0f);
-                bullet.setSharedFlagOnFire(true);
-            }
-
-            level.addFreshEntity(bullet);
-        }
-
-        MusketMod.sendSmokeEffect((ServerLevel)level, origin.add(smokeOffset), direction);
-    }
-
-    public static void fireParticles(Level level, Vec3 origin, Vec3 direction) {
+    public static void fireParticles(Level world, Vec3 origin, Vec3 direction) {
         RandomSource random = RandomSource.create();
 
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i != 10; ++i) {
             double t = Math.pow(random.nextFloat(), 1.5);
             Vec3 p = origin.add(direction.scale(1.25 + t));
             p = p.add(new Vec3(random.nextFloat() - 0.5, random.nextFloat() - 0.5, random.nextFloat() - 0.5).scale(0.1));
             Vec3 v = direction.scale(0.1 * (1 - t));
-            level.addParticle(ParticleTypes.POOF, p.x, p.y, p.z, v.x, v.y, v.z);
+            world.addParticle(ParticleTypes.POOF, p.x, p.y, p.z, v.x, v.y, v.z);
         }
     }
 
-    // COMPAT: Wastelands of Baedoor
+    // for Wastelands of Baedoor
     public static void increaseGunExperience(Player player) {
         final String NAME = "gun_experience";
         Scoreboard board = player.getScoreboard();
         Objective objective = board.getObjective(NAME);
         if (objective == null) {
-            objective = board.addObjective(NAME, ObjectiveCriteria.DUMMY, Component.literal(NAME),
-                ObjectiveCriteria.RenderType.INTEGER, true, null);
+            objective = board.addObjective(NAME, ObjectiveCriteria.DUMMY, Component.literal(NAME), ObjectiveCriteria.RenderType.INTEGER);
         }
-        ScoreAccess score = board.getOrCreatePlayerScore(player, objective);
+        Score score = board.getOrCreatePlayerScore(player.getScoreboardName(), objective);
         score.increment();
     }
 
@@ -479,48 +277,43 @@ public abstract class GunItem extends Item {
     }
 
     public static ItemStack findAmmo(Player player) {
-        ItemStack stack = player.getItemBySlot(EquipmentSlot.OFFHAND);
-        if (isAmmo(stack)) return stack;
+        if (isAmmo(player.getItemBySlot(EquipmentSlot.OFFHAND))) {
+            return player.getItemBySlot(EquipmentSlot.OFFHAND);
 
-        stack = player.getItemBySlot(EquipmentSlot.MAINHAND);
-        if (isAmmo(stack)) return stack;
+        } else if (isAmmo(player.getItemBySlot(EquipmentSlot.MAINHAND))) {
+            return player.getItemBySlot(EquipmentSlot.MAINHAND);
 
-        int size = player.getInventory().getContainerSize();
-        for (int i = 0; i < size; i++) {
-            stack = player.getInventory().getItem(i);
-            if (isAmmo(stack)) return stack;
+        } else {
+            for (int i = 0; i != player.getInventory().getContainerSize(); ++i) {
+                ItemStack itemstack = player.getInventory().getItem(i);
+                if (isAmmo(itemstack)) return itemstack;
+            }
+
+            return ItemStack.EMPTY;
         }
-
-        return ItemStack.EMPTY;
-    }
-
-    public static boolean isReady(ItemStack stack) {
-        return isLoaded(stack) && getLoadingStage(stack) == 0;
     }
 
     public static boolean isLoaded(ItemStack stack) {
-        Boolean loaded = stack.get(LOADED);
-        return loaded != null && loaded;
+        return stack.getOrCreateTag().getByte("loaded") != 0;
     }
 
     public static void setLoaded(ItemStack stack, boolean loaded) {
         if (loaded) {
-            stack.set(LOADED, true);
+            stack.getOrCreateTag().putByte("loaded", (byte)1);
         } else {
-            stack.remove(LOADED);
+            stack.getOrCreateTag().remove("loaded");
         }
     }
 
     public static int getLoadingStage(ItemStack stack) {
-        Byte loadingStage = stack.get(LOADING_STAGE);
-        return loadingStage != null ? loadingStage : 0;
+        return stack.getOrCreateTag().getInt("loadingStage");
     }
 
     public static void setLoadingStage(ItemStack stack, int loadingStage) {
-        if (loadingStage > 0) {
-            stack.set(LOADING_STAGE, (byte)loadingStage);
+        if (loadingStage != 0) {
+            stack.getOrCreateTag().putInt("loadingStage", loadingStage);
         } else {
-            stack.remove(LOADING_STAGE);
+            stack.getOrCreateTag().remove("loadingStage");
         }
     }
 }

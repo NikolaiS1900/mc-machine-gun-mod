@@ -1,35 +1,51 @@
 package ewewukek.musketmod;
 
 import net.minecraft.sounds.SoundEvent;
-import net.minecraft.world.item.ItemStack;
 
 public class PistolItem extends GunItem {
+    public static float bulletStdDev;
+    public static float bulletSpeed;
+    public static float damageMultiplierMin;
+    public static float damageMultiplierMax;
+
+    public static int durability;
+
     public PistolItem(Properties properties) {
-        super(properties);
+        super(properties.defaultDurability(durability));
     }
 
     @Override
     public float bulletStdDev() {
-        return Config.pistolBulletStdDev;
+        return bulletStdDev;
     }
 
     @Override
     public float bulletSpeed() {
-        return Config.pistolBulletSpeed;
+        return bulletSpeed;
     }
 
     @Override
-    public float damage() {
-        return Config.pistolDamage;
+    public float damageMultiplierMin() {
+        return damageMultiplierMin;
     }
 
     @Override
-    public SoundEvent fireSound(ItemStack stack) {
+    public float damageMultiplierMax() {
+        return damageMultiplierMax;
+    }
+
+    @Override
+    public SoundEvent fireSound() {
         return Sounds.PISTOL_FIRE;
     }
 
     @Override
     public boolean twoHanded() {
         return false;
+    }
+
+    @Override
+    public boolean ignoreInvulnerableTime() {
+        return true;
     }
 }
